@@ -194,5 +194,70 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
   }
 });
 
+// GET /profiles list with filters
+// Query params: ageMin, ageMax, gender (filter target), search
+// Returns array of limited fields for matches list
+app.get('/profiles', verifyFirebaseToken, async (req, res) => {
+  const { ageMin, ageMax, gender, search } = req.query;
+  const tokenUid = req.user && req.user.uid;
+  console.log('[GET /profiles] tokenUid=', tokenUid, 'query=', req.query);
+
+  try {
+    const values = [];
+    const where = [];
+
+    if (ageMin) { values.push(parseInt(ageMin, 10)); where.push(`age >= $${values.length}`); }
+    if (ageMax) { values.push(parseInt(ageMax, 10)); where.push(`age <= $${values.length}`); }
+    if (gender) { values.push(gender); where.push(`gender = $${values.length}`); }
+    if (search) { values.push(`%${search.toLowerCase()}%`); where.push(`LOWER(display_name) LIKE $${values.length}`); }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const sql = `
+      SELECT
+        uid AS id,
+        display_name AS name,
+        age,
+        height AS heightCms,
+        community,
+        address AS location,
+        education,
+        (CASE WHEN jsonb_typeof(photos::jsonb) = 'array' AND jsonb_array_length(photos::jsonb) > 0 THEN (photos::jsonb -> 0 ->> 'fileUrl') ELSE NULL END) AS thumbnailUrl,
+        gender
+      FROM users_profiles
+      ${whereSql}
+      ORDER BY updated_at DESC
+      LIMIT 100
+    `;
+
+    const { rows } = await pool.query(sql, values);
+    console.log('[GET /profiles] rows', rows.length);
+    return res.json({ items: rows });
+  } catch (err) {
+    console.error('[GET /profiles] error', err);
+    return res.status(500).json({ error: 'Failed to fetch profiles' });
+  }
+});
+
+// GET /profiles/:uid - return profile row if exists, else 404
+app.get('/profiles/:uid', verifyFirebaseToken, async (req, res) => {
+  const tokenUid = req.user && req.user.uid;
+  const uid = req.params.uid;
+  console.log('[GET /profiles/:uid] tokenUid=', tokenUid, 'paramUid=', uid);
+  if (!tokenUid || tokenUid !== uid) {
+    console.warn('[GET /profiles/:uid] Forbidden: UID mismatch');
+    return res.status(403).json({ error: 'Forbidden: UID mismatch' });
+  }
+  try {
+    const q = 'SELECT uid, display_name, profile_complete, photos FROM users_profiles WHERE uid = $1';
+    const r = await pool.query(q, [uid]);
+    console.log('[GET /profiles/:uid] rows:', r.rows.length);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    console.log('[GET /profiles/:uid] row:', r.rows[0]);
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error('Failed fetching profile', e);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`Backend listening on ${port}`));
