@@ -79,6 +79,11 @@ async function verifyFirebaseToken(req, res, next) {
   }
 }
 
+// Lightweight health check to verify connectivity from devices/Render
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
+
 // POST /upload-urls
 // Body: { files: [{ name: 'photo.jpg', contentType: 'image/jpeg' }, ...] }
 // Response: { uploads: [{ key, uploadUrl, fileUrl }, ...] }
