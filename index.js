@@ -96,14 +96,58 @@ const s3Client = new S3Client({
   },
 });   
 
-// Postgres pool
-// If you use Supabase (or any host requiring TLS), enable ssl with rejectUnauthorized:false
-// to allow node-postgres to connect in environments where certificates are not verified.
-const pgConfig = { connectionString: process.env.DATABASE_URL };
-if (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('supabase.co')) {
-  pgConfig.ssl = { rejectUnauthorized: false };
+// Postgres Pool (IPv4-preferred). Build the pool lazily to force IPv4 resolution if needed.
+let poolPromise;
+async function getPool() {
+  if (poolPromise) return poolPromise;
+  poolPromise = (async () => {
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) {
+      console.warn('DATABASE_URL not set');
+      return new Pool();
+    }
+    try {
+      const u = new URL(dbUrl);
+      const host = u.hostname;
+      const port = parseInt(u.port || '5432', 10);
+      const user = decodeURIComponent(u.username || '');
+      const password = decodeURIComponent(u.password || '');
+      const database = (u.pathname || '').replace(/^\//, '');
+
+      // Resolve IPv4 address explicitly to avoid IPv6 ENETUNREACH
+      let ipv4Host = host;
+      try {
+        ipv4Host = await new Promise((resolve, reject) => {
+          dns.lookup(host, { family: 4 }, (err, address) => {
+            if (err) return reject(err);
+            resolve(address);
+          });
+        });
+        console.log('Postgres host resolved to IPv4:', ipv4Host);
+      } catch (e) {
+        console.warn('IPv4 DNS lookup failed for host', host, '-', e && e.message, '; using original host');
+      }
+
+      const cfg = {
+        host: ipv4Host,
+        port,
+        user,
+        password,
+        database,
+      };
+      if (dbUrl.includes('supabase.co')) {
+        cfg.ssl = { rejectUnauthorized: false };
+      }
+      return new Pool(cfg);
+    } catch (e) {
+      console.warn('Failed to parse DATABASE_URL; falling back to connectionString. Err:', e && e.message);
+      const cfg = { connectionString: dbUrl };
+      if (dbUrl.includes('supabase.co')) cfg.ssl = { rejectUnauthorized: false };
+      return new Pool(cfg);
+    }
+  })();
+  return poolPromise;
 }
-const pool = new Pool(pgConfig);
 
 async function verifyFirebaseToken(req, res, next) {
   const auth = req.headers.authorization || '';
@@ -231,6 +275,7 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
       horoscope,
     ];
 
+    const pool = await getPool();
     await pool.query(query, values);
     res.json({ ok: true });
   } catch (e) {
@@ -274,6 +319,7 @@ app.get('/profiles', verifyFirebaseToken, async (req, res) => {
       LIMIT 100
     `;
 
+    const pool = await getPool();
     const { rows } = await pool.query(sql, values);
     console.log('[GET /profiles] rows', rows.length);
     return res.json({ items: rows });
@@ -294,6 +340,7 @@ app.get('/profiles/:uid', verifyFirebaseToken, async (req, res) => {
   }
   try {
     const q = 'SELECT uid, display_name, profile_complete, photos FROM users_profiles WHERE uid = $1';
+    const pool = await getPool();
     const r = await pool.query(q, [uid]);
     console.log('[GET /profiles/:uid] rows:', r.rows.length);
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
