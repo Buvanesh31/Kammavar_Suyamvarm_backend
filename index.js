@@ -250,10 +250,14 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
         updated_at = now();
     `;
 
+    // Accept both camelCase and snake_case for display name; normalize gender to lowercase
+    const displayName = profile.display_name || profile.displayName || null;
+    const genderNormalized = profile.gender ? String(profile.gender).toLowerCase() : null;
+
     const values = [
       uid,
-      profile.displayName || null,
-      profile.gender || null,
+      displayName,
+      genderNormalized,
       profile.dob || null,
       profile.age || null,
       profile.height || null,
@@ -298,7 +302,8 @@ app.get('/profiles', verifyFirebaseToken, async (req, res) => {
 
     if (ageMin) { values.push(parseInt(ageMin, 10)); where.push(`age >= $${values.length}`); }
     if (ageMax) { values.push(parseInt(ageMax, 10)); where.push(`age <= $${values.length}`); }
-    if (gender) { values.push(gender); where.push(`gender = $${values.length}`); }
+    if (gender) { values.push(String(gender).toLowerCase()); where.push(`LOWER(gender) = $${values.length}`); }
+    if (tokenUid) { values.push(tokenUid); where.push(`uid <> $${values.length}`); }
     if (search) { values.push(`%${search.toLowerCase()}%`); where.push(`LOWER(display_name) LIKE $${values.length}`); }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -311,7 +316,13 @@ app.get('/profiles', verifyFirebaseToken, async (req, res) => {
         community,
         address AS location,
         education,
-        (CASE WHEN jsonb_typeof(photos::jsonb) = 'array' AND jsonb_array_length(photos::jsonb) > 0 THEN (photos::jsonb -> 0 ->> 'fileUrl') ELSE NULL END) AS thumbnailUrl,
+        (
+          CASE
+            WHEN jsonb_typeof(photos::jsonb) = 'array' AND jsonb_array_length(photos::jsonb) > 0
+            THEN COALESCE((photos::jsonb -> 0 ->> 'thumbnail_url'), (photos::jsonb -> 0 ->> 'url'))
+            ELSE NULL
+          END
+        ) AS thumbnailUrl,
         gender
       FROM users_profiles
       ${whereSql}
@@ -339,7 +350,7 @@ app.get('/profiles/:uid', verifyFirebaseToken, async (req, res) => {
     return res.status(403).json({ error: 'Forbidden: UID mismatch' });
   }
   try {
-    const q = 'SELECT uid, display_name, profile_complete, photos FROM users_profiles WHERE uid = $1';
+    const q = 'SELECT uid, display_name, gender, profile_complete, photos FROM users_profiles WHERE uid = $1';
     const pool = await getPool();
     const r = await pool.query(q, [uid]);
     console.log('[GET /profiles/:uid] rows:', r.rows.length);
