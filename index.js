@@ -11,6 +11,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const fs = require('fs');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { Pool } = require('pg');
@@ -33,15 +34,54 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Init Firebase Admin
-if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)),
-  });
-} else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-  admin.initializeApp(); // uses env var path
-} else {
-  console.warn('Warning: Firebase admin not initialized - set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SERVICE_ACCOUNT_JSON');
+// Init Firebase Admin with robust env handling for Render
+(() => {
+  try {
+    let initialized = false;
+    const jsonInline = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    const jsonB64 = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64;
+    const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+    if (jsonInline) {
+      const parsed = JSON.parse(jsonInline);
+      admin.initializeApp({ credential: admin.credential.cert(parsed) });
+      console.log('Firebase Admin initialized from GOOGLE_SERVICE_ACCOUNT_JSON');
+      initialized = true;
+    } else if (jsonB64) {
+      const decoded = Buffer.from(jsonB64, 'base64').toString('utf8');
+      const parsed = JSON.parse(decoded);
+      admin.initializeApp({ credential: admin.credential.cert(parsed) });
+      console.log('Firebase Admin initialized from GOOGLE_SERVICE_ACCOUNT_JSON_BASE64');
+      initialized = true;
+    } else if (credPath) {
+      if (fs.existsSync(credPath)) {
+        const parsed = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+        admin.initializeApp({ credential: admin.credential.cert(parsed) });
+        console.log('Firebase Admin initialized from GOOGLE_APPLICATION_CREDENTIALS path');
+        initialized = true;
+      } else {
+        console.warn('GOOGLE_APPLICATION_CREDENTIALS set but file not found:', credPath);
+      }
+    }
+
+    if (!initialized) {
+      admin.initializeApp();
+      console.warn('Firebase Admin initialized without explicit credentials; suitable for ID token verification');
+    }
+  } catch (e) {
+    console.error('Failed to initialize Firebase Admin; falling back to default init', e && e.message);
+    try { admin.initializeApp(); } catch (_) {}
+  }
+})();
+
+// Ensure default app exists even if the above block didn't initialize
+if (!admin.apps || admin.apps.length === 0) {
+  try {
+    admin.initializeApp();
+    console.log('Firebase Admin default app initialized');
+  } catch (e) {
+    console.error('Firebase Admin default init failed:', e && e.message);
+  }
 }
 
 // Init S3 client for Cloudflare R2 (S3-compatible)
@@ -74,8 +114,8 @@ async function verifyFirebaseToken(req, res, next) {
     req.user = decoded;
     next();
   } catch (e) {
-    console.error('Token verify failed', e);
-    res.status(401).json({ error: 'Invalid token' });
+    console.error('Token verify failed', e && e.message);
+    res.status(401).json({ error: 'Invalid token', detail: (e && e.message) || 'verifyIdToken failed' });
   }
 }
 
