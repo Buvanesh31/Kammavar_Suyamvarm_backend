@@ -173,6 +173,7 @@ app.get('/health', (_req, res) => {
 // Response: { uploads: [{ key, uploadUrl, fileUrl }, ...] }
 app.post('/upload-urls', verifyFirebaseToken, async (req, res) => {
   const files = req.body.files || [];
+  const categoryRaw = (req.body.category || '').toString().trim().toLowerCase();
   const uid = req.user && req.user.uid;
   if (!uid) return res.status(400).json({ error: 'Invalid user' });
   if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: 'No files requested' });
@@ -181,10 +182,12 @@ app.post('/upload-urls', verifyFirebaseToken, async (req, res) => {
 
   try {
     const uploads = [];
+    // Allow choosing target folder: 'photos' (default) or 'horoscope'
+    const category = ['photos', 'horoscope'].includes(categoryRaw) ? categoryRaw : 'photos';
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const ext = (file.name && file.name.split('.').pop()) || 'jpg';
-      const key = `users/${uid}/photos/${Date.now()}-${i}.${ext}`;
+      const key = `users/${uid}/${category}/${Date.now()}-${i}.${ext}`;
 
       const putParams = {
         Bucket: bucket,
@@ -195,10 +198,15 @@ app.post('/upload-urls', verifyFirebaseToken, async (req, res) => {
       const command = new PutObjectCommand(putParams);
       const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 60 * 10 }); // 10 minutes
 
-      // Construct public file URL - if you configured a custom domain or expose R2 publicly, adjust accordingly
-      // Default Cloudflare R2 public URL pattern (when public): https://<account-id>.r2.cloudflarestorage.com/<bucket>/<key>
-      // If you front with a CDN or custom domain, use that instead.
-      const fileUrl = `${r2Endpoint.replace(/\/$/, '')}/${bucket}/${encodeURIComponent(key)}`;
+      // Construct public file URL
+      // If PUBLIC_R2_BASE (Cloudflare Public Development URL) is set, it is per-bucket, so omit bucket in path.
+      // Otherwise, fall back to the account endpoint which requires /<bucket>/<key>.
+      const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+      const publicDevBase = process.env.PUBLIC_R2_BASE ? process.env.PUBLIC_R2_BASE.replace(/\/$/, '') : '';
+      const accountBase = r2Endpoint.replace(/\/$/, '');
+      const fileUrl = publicDevBase
+        ? `${publicDevBase}/${encodedKey}`
+        : `${accountBase}/${bucket}/${encodedKey}`;
 
       uploads.push({ key, uploadUrl, fileUrl });
     }
@@ -222,8 +230,8 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
     const horoscope = profile.horoscope ? JSON.stringify(profile.horoscope) : 'null';
 
     const query = `
-      INSERT INTO users_profiles(uid, display_name, gender, dob, age, height, weight, kulam, gothram, star, zodiac, community, education, occupation, salary, address, family_description, father_name, mother_name, contact_number, photos, horoscope, profile_complete, created_at, updated_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22, true, now(), now())
+      INSERT INTO users_profiles(uid, display_name, gender, dob, age, height, weight, kulam, gothram, star, zodiac, community, education, occupation, salary, address, family_description, father_name, mother_name, contact_number, photos, horoscope, country_group, state, city, profile_complete, created_at, updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25, true, now(), now())
       ON CONFLICT (uid) DO UPDATE SET
         display_name = EXCLUDED.display_name,
         gender = EXCLUDED.gender,
@@ -246,6 +254,9 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
         contact_number = EXCLUDED.contact_number,
         photos = EXCLUDED.photos,
         horoscope = EXCLUDED.horoscope,
+        country_group = EXCLUDED.country_group,
+        state = EXCLUDED.state,
+        city = EXCLUDED.city,
         profile_complete = true,
         updated_at = now();
     `;
@@ -277,6 +288,9 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
       profile.contactNumber || null,
       photos,
       horoscope,
+      (profile.location && profile.location.countryGroup) ? String(profile.location.countryGroup).toLowerCase() : null,
+      (profile.location && profile.location.state) ? String(profile.location.state) : null,
+      (profile.location && profile.location.city) ? String(profile.location.city) : null,
     ];
 
     const pool = await getPool();
@@ -292,7 +306,7 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
 // Query params: ageMin, ageMax, gender (filter target), search
 // Returns array of limited fields for matches list
 app.get('/profiles', verifyFirebaseToken, async (req, res) => {
-  const { ageMin, ageMax, gender, search } = req.query;
+  const { ageMin, ageMax, gender, search, location, dosham, occupation, countryGroup, state, city } = req.query;
   const tokenUid = req.user && req.user.uid;
   console.log('[GET /profiles] tokenUid=', tokenUid, 'query=', req.query);
 
@@ -305,6 +319,12 @@ app.get('/profiles', verifyFirebaseToken, async (req, res) => {
     if (gender) { values.push(String(gender).toLowerCase()); where.push(`LOWER(gender) = $${values.length}`); }
     if (tokenUid) { values.push(tokenUid); where.push(`uid <> $${values.length}`); }
     if (search) { values.push(`%${search.toLowerCase()}%`); where.push(`LOWER(display_name) LIKE $${values.length}`); }
+    if (location) { values.push(`%${String(location).toLowerCase()}%`); where.push(`LOWER(address) LIKE $${values.length}`); }
+    if (occupation) { values.push(`%${String(occupation).toLowerCase()}%`); where.push(`LOWER(occupation) LIKE $${values.length}`); }
+    if (dosham) { values.push(`%${String(dosham).toLowerCase()}%`); where.push(`LOWER((horoscope::jsonb ->> 'dosham')) LIKE $${values.length}`); }
+    if (countryGroup) { values.push(String(countryGroup).toLowerCase()); where.push(`LOWER(country_group) = $${values.length}`); }
+    if (state) { values.push(`%${String(state).toLowerCase()}%`); where.push(`LOWER(state) LIKE $${values.length}`); }
+    if (city) { values.push(`%${String(city).toLowerCase()}%`); where.push(`LOWER(city) LIKE $${values.length}`); }
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const sql = `
@@ -314,15 +334,19 @@ app.get('/profiles', verifyFirebaseToken, async (req, res) => {
         age,
         height AS heightCms,
         community,
-        address AS location,
+        CASE WHEN LOWER(country_group) = 'india'
+             THEN CONCAT(COALESCE(state, ''), CASE WHEN state IS NOT NULL AND city IS NOT NULL THEN ', ' ELSE '' END, COALESCE(city, ''))
+             ELSE COALESCE(city, '') END AS location,
         education,
+        salary,
+        (horoscope::jsonb ->> 'dosham') AS dosham,
         (
           CASE
             WHEN jsonb_typeof(photos::jsonb) = 'array' AND jsonb_array_length(photos::jsonb) > 0
             THEN COALESCE((photos::jsonb -> 0 ->> 'thumbnail_url'), (photos::jsonb -> 0 ->> 'url'))
             ELSE NULL
           END
-        ) AS thumbnailUrl,
+        ) AS thumbnail_url,
         gender
       FROM users_profiles
       ${whereSql}
@@ -333,7 +357,33 @@ app.get('/profiles', verifyFirebaseToken, async (req, res) => {
     const pool = await getPool();
     const { rows } = await pool.query(sql, values);
     console.log('[GET /profiles] rows', rows.length);
-    return res.json({ items: rows });
+    // Normalize and rewrite URLs to public base if needed
+    const publicBase = (process.env.PUBLIC_R2_BASE || '').replace(/\/$/, '');
+    const bucketName = process.env.R2_BUCKET || '';
+    const items = rows.map((r) => {
+      if (r.thumbnail_url) {
+        let url = String(r.thumbnail_url);
+        // Decode %2F -> /
+        try { url = decodeURIComponent(url); } catch (_) { url = url.replace(/%2F/g, '/'); }
+        // If using cloudflarestorage host, rewrite to PUBLIC_R2_BASE for public reads
+        try {
+          const u = new URL(url);
+          if (publicBase && u.hostname.endsWith('r2.cloudflarestorage.com')) {
+            const parts = u.pathname.split('/').filter(Boolean);
+            const withoutBucket = (parts.length && parts[0] === bucketName) ? parts.slice(1).join('/') : parts.join('/');
+            r.thumbnail_url = `${publicBase}/${withoutBucket}`;
+          } else {
+            r.thumbnail_url = url;
+          }
+        } catch (_) {
+          r.thumbnail_url = url;
+        }
+      }
+      // Normalize gender to lowercase for clients expecting case-insensitive values
+      if (r.gender) r.gender = String(r.gender).toLowerCase();
+      return r;
+    });
+    return res.json({ items });
   } catch (err) {
     console.error('[GET /profiles] error', err);
     return res.status(500).json({ error: 'Failed to fetch profiles' });
@@ -360,6 +410,125 @@ app.get('/profiles/:uid', verifyFirebaseToken, async (req, res) => {
   } catch (e) {
     console.error('Failed fetching profile', e);
     res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// GET /profiles/public/:uid - return public profile fields for viewing others
+app.get('/profiles/public/:uid', verifyFirebaseToken, async (req, res) => {
+  const uid = req.params.uid;
+  console.log('[GET /profiles/public/:uid] paramUid=', uid);
+  try {
+    const q = `
+      SELECT
+        uid,
+        display_name,
+        gender,
+        age,
+        height,
+        weight,
+        kulam,
+        gothram,
+        star,
+        zodiac,
+        community,
+        education,
+        occupation,
+        salary,
+        address,
+        country_group,
+        state,
+        city,
+        family_description,
+        father_name,
+        mother_name,
+        contact_number,
+        photos,
+        horoscope
+      FROM users_profiles WHERE uid = $1`;
+    const pool = await getPool();
+    const r = await pool.query(q, [uid]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+
+    const row = r.rows[0];
+    // Normalize URLs in photos array
+    const publicBase = (process.env.PUBLIC_R2_BASE || '').replace(/\/$/, '');
+    const bucketName = process.env.R2_BUCKET || '';
+    try {
+      const photos = Array.isArray(row.photos) ? row.photos : JSON.parse(row.photos || '[]');
+      row.photos = photos.map((p) => {
+        let url = p.thumbnail_url || p.url || '';
+        if (url) {
+          try { url = decodeURIComponent(url); } catch (_) { url = String(url).replace(/%2F/g, '/'); }
+          try {
+            const u = new URL(url);
+            if (publicBase && u.hostname.endsWith('r2.cloudflarestorage.com')) {
+              const parts = u.pathname.split('/').filter(Boolean);
+              const withoutBucket = (parts.length && parts[0] === bucketName) ? parts.slice(1).join('/') : parts.join('/');
+              p.thumbnail_url = `${publicBase}/${withoutBucket}`;
+              p.url = p.url ? `${publicBase}/${withoutBucket}` : p.url;
+            }
+          } catch (_) {/* ignore */}
+        }
+        return p;
+      });
+    } catch (e) {
+      console.warn('[GET /profiles/public/:uid] photo normalize failed', e && e.message);
+    }
+    // Extract birth details from horoscope JSON if present
+    try {
+      const horo = typeof row.horoscope === 'string' ? JSON.parse(row.horoscope) : (row.horoscope || {});
+      if (horo && typeof horo === 'object') {
+        if (horo.time_of_birth) row.time_of_birth = horo.time_of_birth;
+        if (horo.birth_location) row.birth_location = horo.birth_location;
+      }
+    } catch (e) {
+      console.warn('[GET /profiles/public/:uid] horoscope parse failed', e && e.message);
+    }
+    if (row.gender) row.gender = String(row.gender).toLowerCase();
+    return res.json(row);
+  } catch (e) {
+    console.error('Failed fetching public profile', e);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// POST /profiles/horoscope-images
+// Body: { images: ["https://...", "https://..."] } (max 2)
+// Merges images into existing horoscope JSON for the authenticated user
+app.post('/profiles/horoscope-images', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    let images = Array.isArray(req.body.images) ? req.body.images : [];
+    images = images.filter((u) => typeof u === 'string' && u.trim().length > 0).slice(0, 2);
+    if (images.length === 0) return res.status(400).json({ error: 'No valid image URLs provided' });
+
+    const pool = await getPool();
+    // Fetch existing horoscope JSON
+    const sel = await pool.query('SELECT horoscope FROM users_profiles WHERE uid = $1', [uid]);
+    let horo = {};
+    if (sel.rows.length > 0) {
+      const existing = sel.rows[0].horoscope;
+      try {
+        horo = typeof existing === 'string' ? JSON.parse(existing || '{}') : (existing || {});
+      } catch (e) {
+        console.warn('[POST /profiles/horoscope-images] failed to parse existing horoscope', e && e.message);
+        horo = {};
+      }
+    }
+    horo.images = images;
+    const horoStr = JSON.stringify(horo);
+
+    // Update row (assumes profile row exists after registration)
+    const upd = await pool.query('UPDATE users_profiles SET horoscope = $2, updated_at = now() WHERE uid = $1', [uid, horoStr]);
+    if (upd.rowCount === 0) {
+      // If row doesn't exist yet, insert a minimal row to hold horoscope
+      await pool.query('INSERT INTO users_profiles(uid, horoscope, profile_complete, created_at, updated_at) VALUES($1, $2, false, now(), now()) ON CONFLICT(uid) DO UPDATE SET horoscope = EXCLUDED.horoscope, updated_at = now()', [uid, horoStr]);
+    }
+    return res.json({ ok: true, images });
+  } catch (e) {
+    console.error('[POST /profiles/horoscope-images] error', e);
+    return res.status(500).json({ error: 'Failed to save horoscope images' });
   }
 });
 const port = process.env.PORT || 8080;
