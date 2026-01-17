@@ -12,7 +12,7 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const fs = require('fs');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { Pool } = require('pg');
 const dns = require('dns');
@@ -433,6 +433,7 @@ app.get('/profiles/public/:uid', verifyFirebaseToken, async (req, res) => {
         community,
         education,
         occupation,
+        company_name,
         salary,
         address,
         country_group,
@@ -440,7 +441,11 @@ app.get('/profiles/public/:uid', verifyFirebaseToken, async (req, res) => {
         city,
         family_description,
         father_name,
+        father_occupation,
         mother_name,
+        mother_occupation,
+        siblings_count,
+        siblings_married_count,
         contact_number,
         photos,
         horoscope
@@ -495,12 +500,200 @@ app.get('/profiles/public/:uid', verifyFirebaseToken, async (req, res) => {
 // POST /profiles/horoscope-images
 // Body: { images: ["https://...", "https://..."] } (max 2)
 // Merges images into existing horoscope JSON for the authenticated user
+// Lightweight section updates for My Profile editor
+
+// POST /profiles/update-family
+// Body: { fatherName, motherName, fatherOccupation, motherOccupation, siblingsCount, siblingsMarriedCount, familyDescription, contactNumber, address }
+app.post('/profiles/update-family', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    const {
+      fatherName,
+      motherName,
+      fatherOccupation,
+      motherOccupation,
+      siblingsCount,
+      siblingsMarriedCount,
+      familyDescription,
+      contactNumber,
+      address,
+    } = req.body || {};
+
+    const pool = await getPool();
+    console.log('[POST /profiles/update-family]', uid, {
+      fatherName: !!fatherName,
+      motherName: !!motherName,
+      fatherOccupation: !!fatherOccupation,
+      motherOccupation: !!motherOccupation,
+      siblingsCount,
+      siblingsMarriedCount,
+    });
+    await pool.query(
+      `UPDATE users_profiles
+         SET father_name = $2,
+             mother_name = $3,
+             father_occupation = $4,
+             mother_occupation = $5,
+             siblings_count = $6,
+             siblings_married_count = $7,
+             family_description = $8,
+             contact_number = $9,
+             address = $10,
+             updated_at = now()
+       WHERE uid = $1`,
+      [
+        uid,
+        fatherName || null,
+        motherName || null,
+        fatherOccupation || null,
+        motherOccupation || null,
+        typeof siblingsCount === 'number' ? siblingsCount : (siblingsCount ? Number(siblingsCount) : null),
+        typeof siblingsMarriedCount === 'number' ? siblingsMarriedCount : (siblingsMarriedCount ? Number(siblingsMarriedCount) : null),
+        familyDescription || null,
+        contactNumber || null,
+        address || null,
+      ],
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /profiles/update-family] error', e && e.message);
+    return res.status(500).json({ error: 'Failed to update family section' });
+  }
+});
+
+// POST /profiles/update-education
+// Body: { education, occupation, companyName, salary }
+app.post('/profiles/update-education', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    const { education, occupation, companyName, salary } = req.body || {};
+    const pool = await getPool();
+    console.log('[POST /profiles/update-education]', uid, { education, occupation, hasCompany: !!companyName });
+    await pool.query(
+      `UPDATE users_profiles
+         SET education = $2,
+             occupation = $3,
+             company_name = $4,
+             salary = $5,
+             updated_at = now()
+       WHERE uid = $1`,
+      [uid, education || null, occupation || null, companyName || null, salary || null],
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /profiles/update-education] error', e && e.message);
+    return res.status(500).json({ error: 'Failed to update education section' });
+  }
+});
+
+// POST /profiles/update-location
+// Body: { countryGroup, state, city }
+app.post('/profiles/update-location', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    const { countryGroup, state, city } = req.body || {};
+    const pool = await getPool();
+    console.log('[POST /profiles/update-location]', uid, { countryGroup, state, city });
+    await pool.query(
+      `UPDATE users_profiles
+         SET country_group = $2,
+             state = $3,
+             city = $4,
+             updated_at = now()
+       WHERE uid = $1`,
+      [
+        uid,
+        countryGroup ? String(countryGroup).toLowerCase() : null,
+        state || null,
+        city || null,
+      ],
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /profiles/update-location] error', e && e.message);
+    return res.status(500).json({ error: 'Failed to update location section' });
+  }
+});
+
+// POST /profiles/update-basic
+// Body: { displayName, height, weight, kulam, gothram, community }
+app.post('/profiles/update-basic', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    const { displayName, height, weight, kulam, gothram, community } = req.body || {};
+    const pool = await getPool();
+    console.log('[POST /profiles/update-basic]', uid, { hasName: !!displayName, height, weight });
+    await pool.query(
+      `UPDATE users_profiles
+         SET display_name = $2,
+             height = $3,
+             weight = $4,
+             kulam = $5,
+             gothram = $6,
+             community = $7,
+             updated_at = now()
+       WHERE uid = $1`,
+      [uid, displayName || null, height || null, weight || null, kulam || null, gothram || null, community || null],
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /profiles/update-basic] error', e && e.message);
+    return res.status(500).json({ error: 'Failed to update basic profile' });
+  }
+});
+
+// POST /profiles/update-birth
+// Body: { dob, timeOfBirth, birthLocation, star, zodiac }
+app.post('/profiles/update-birth', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    const { dob, timeOfBirth, birthLocation, star, zodiac, age } = req.body || {};
+    const pool = await getPool();
+    console.log('[POST /profiles/update-birth]', uid, { dob, star, zodiac, hasTime: !!timeOfBirth });
+
+    // Merge timeOfBirth and birthLocation into horoscope JSON while updating columns
+    let horo = {};
+    try {
+      const sel = await pool.query('SELECT horoscope FROM users_profiles WHERE uid = $1', [uid]);
+      if (sel.rows.length > 0) {
+        const existing = sel.rows[0].horoscope;
+        horo = typeof existing === 'string' ? JSON.parse(existing || '{}') : (existing || {});
+      }
+    } catch (_) {}
+    if (timeOfBirth !== undefined) horo.time_of_birth = timeOfBirth || null;
+    if (birthLocation !== undefined) horo.birth_location = birthLocation || null;
+    const horoStr = JSON.stringify(horo);
+
+    await pool.query(
+      `UPDATE users_profiles
+         SET dob = $2,
+             star = $3,
+             zodiac = $4,
+             horoscope = $5,
+             age = COALESCE($6, age),
+             updated_at = now()
+       WHERE uid = $1`,
+      [uid, dob || null, star || null, zodiac || null, horoStr, (typeof age === 'number' ? age : (age ? Number(age) : null))],
+    );
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /profiles/update-birth] error', e && e.message);
+    return res.status(500).json({ error: 'Failed to update birth section' });
+  }
+});
+
+// POST /profiles/horoscope-images
 app.post('/profiles/horoscope-images', verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.user && req.user.uid;
     if (!uid) return res.status(400).json({ error: 'Invalid user' });
     let images = Array.isArray(req.body.images) ? req.body.images : [];
-    images = images.filter((u) => typeof u === 'string' && u.trim().length > 0).slice(0, 2);
+    images = images.filter((u) => typeof u === 'string' && u.trim().length > 0).slice(0, 4);
     if (images.length === 0) return res.status(400).json({ error: 'No valid image URLs provided' });
 
     const pool = await getPool();
@@ -516,19 +709,126 @@ app.post('/profiles/horoscope-images', verifyFirebaseToken, async (req, res) => 
         horo = {};
       }
     }
+    // Delete removed URLs if provided
+    const deleteUrls = Array.isArray(req.body.deleteUrls) ? req.body.deleteUrls : [];
+    const bucket = process.env.R2_BUCKET;
+    if (bucket && deleteUrls.length > 0) {
+      for (const u of deleteUrls) {
+        try {
+          const key = (function urlToKey(urlStr) {
+            try {
+              const u = new URL(String(urlStr));
+              let pathname = decodeURIComponent(u.pathname).replace(/^\//, '');
+              const publicBase = (process.env.PUBLIC_R2_BASE || '').replace(/\/$/, '');
+              const bucketName = process.env.R2_BUCKET || '';
+              if (publicBase && urlStr.startsWith(publicBase)) return pathname;
+              if (u.hostname.endsWith('r2.cloudflarestorage.com')) {
+                const parts = pathname.split('/');
+                if (parts.length >= 2 && parts[0] === bucketName) return parts.slice(1).join('/');
+                return pathname;
+              }
+              return pathname;
+            } catch (_) {
+              return null;
+            }
+          })(u);
+          if (key) await s3Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+        } catch (e) {
+          console.warn('[POST /profiles/horoscope-images] delete failed', e && e.message);
+        }
+      }
+    }
+
     horo.images = images;
     const horoStr = JSON.stringify(horo);
-
-    // Update row (assumes profile row exists after registration)
     const upd = await pool.query('UPDATE users_profiles SET horoscope = $2, updated_at = now() WHERE uid = $1', [uid, horoStr]);
     if (upd.rowCount === 0) {
-      // If row doesn't exist yet, insert a minimal row to hold horoscope
       await pool.query('INSERT INTO users_profiles(uid, horoscope, profile_complete, created_at, updated_at) VALUES($1, $2, false, now(), now()) ON CONFLICT(uid) DO UPDATE SET horoscope = EXCLUDED.horoscope, updated_at = now()', [uid, horoStr]);
     }
     return res.json({ ok: true, images });
   } catch (e) {
     console.error('[POST /profiles/horoscope-images] error', e);
     return res.status(500).json({ error: 'Failed to save horoscope images' });
+  }
+});
+
+// POST /profiles/photos
+// Body: { photos: [{ url, thumbnail_url, key?, thumb_key? }, ...], deleteKeys?: [key1, key2] }
+// Updates the user's photos array and optionally deletes removed R2 objects.
+app.post('/profiles/photos', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.user && req.user.uid;
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    let photos = Array.isArray(req.body.photos) ? req.body.photos : [];
+    const deleteKeys = Array.isArray(req.body.deleteKeys) ? req.body.deleteKeys : [];
+    // Sanitize photos entries
+    photos = photos
+      .filter((p) => p && typeof p === 'object' && typeof p.url === 'string' && p.url.trim().length > 0)
+      .map((p) => ({
+        url: String(p.url),
+        thumbnail_url: typeof p.thumbnail_url === 'string' ? String(p.thumbnail_url) : null,
+        key: p.key ? String(p.key) : undefined,
+        thumb_key: p.thumb_key ? String(p.thumb_key) : undefined,
+      }));
+
+    const pool = await getPool();
+    const photosStr = JSON.stringify(photos);
+    const upd = await pool.query('UPDATE users_profiles SET photos = $2, updated_at = now() WHERE uid = $1', [uid, photosStr]);
+    if (upd.rowCount === 0) {
+      await pool.query('INSERT INTO users_profiles(uid, photos, profile_complete, created_at, updated_at) VALUES($1, $2, false, now(), now()) ON CONFLICT(uid) DO UPDATE SET photos = EXCLUDED.photos, updated_at = now()', [uid, photosStr]);
+    }
+
+    // Delete removed R2 objects if requested
+    const bucket = process.env.R2_BUCKET;
+    // Also accept deleteUrls and derive keys
+    const deleteUrls = Array.isArray(req.body.deleteUrls) ? req.body.deleteUrls : [];
+    const keysFromUrls = [];
+    for (const u of deleteUrls) {
+      const key = (function urlToKey(urlStr) {
+        try {
+          const u = new URL(String(urlStr));
+          const host = u.hostname;
+          let pathname = decodeURIComponent(u.pathname);
+          pathname = pathname.replace(/^\//, '');
+          const publicBase = (process.env.PUBLIC_R2_BASE || '').replace(/\/$/, '');
+          const bucketName = process.env.R2_BUCKET || '';
+          if (publicBase && urlStr.startsWith(publicBase)) {
+            // PUBLIC_R2_BASE/<key>
+            return pathname;
+          }
+          if (host.endsWith('r2.cloudflarestorage.com')) {
+            const parts = pathname.split('/');
+            // /<bucket>/<key>
+            if (parts.length >= 2 && parts[0] === bucketName) {
+              return parts.slice(1).join('/');
+            }
+            // Sometimes bucket omitted in dev base; return as-is
+            return pathname;
+          }
+          // Fallback: return decoded path
+          return pathname;
+        } catch (_) {
+          return null;
+        }
+      })(u);
+      if (key) keysFromUrls.push(key);
+    }
+
+    const allDeleteKeys = [...deleteKeys, ...keysFromUrls];
+    if (bucket && allDeleteKeys.length > 0) {
+      for (const key of allDeleteKeys) {
+        if (typeof key !== 'string' || !key) continue;
+        try {
+          await s3Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+        } catch (e) {
+          console.warn('[POST /profiles/photos] delete failed for key', key, e && e.message);
+        }
+      }
+    }
+    return res.json({ ok: true, photos });
+  } catch (e) {
+    console.error('[POST /profiles/photos] error', e);
+    return res.status(500).json({ error: 'Failed to update photos' });
   }
 });
 const port = process.env.PORT || 8080;
