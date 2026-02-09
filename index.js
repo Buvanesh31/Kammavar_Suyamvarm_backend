@@ -230,8 +230,8 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
     const horoscope = profile.horoscope ? JSON.stringify(profile.horoscope) : 'null';
 
     const query = `
-      INSERT INTO users_profiles(uid, display_name, gender, dob, age, height, weight, kulam, gothram, star, zodiac, community, education, occupation, salary, address, family_description, father_name, mother_name, contact_number, photos, horoscope, country_group, state, city, profile_complete, created_at, updated_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25, true, now(), now())
+      INSERT INTO users_profiles(uid, display_name, gender, dob, age, height, weight, kulam, gothram, star, zodiac, community, education, occupation, company_name, designation, salary, address, family_description, father_name, mother_name, contact_number, photos, horoscope, country_group, state, city, profile_complete, created_at, updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27, true, now(), now())
       ON CONFLICT (uid) DO UPDATE SET
         display_name = EXCLUDED.display_name,
         gender = EXCLUDED.gender,
@@ -246,6 +246,8 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
         community = EXCLUDED.community,
         education = EXCLUDED.education,
         occupation = EXCLUDED.occupation,
+        company_name = EXCLUDED.company_name,
+        designation = EXCLUDED.designation,
         salary = EXCLUDED.salary,
         address = EXCLUDED.address,
         family_description = EXCLUDED.family_description,
@@ -280,6 +282,8 @@ app.post('/profiles', verifyFirebaseToken, async (req, res) => {
       profile.community || null,
       profile.education || null,
       profile.occupation || null,
+      profile.companyName || null,
+      profile.designation || null,
       profile.salary || null,
       profile.address || null,
       profile.familyDescription || null,
@@ -434,6 +438,7 @@ app.get('/profiles/public/:uid', verifyFirebaseToken, async (req, res) => {
         education,
         occupation,
         company_name,
+        designation,
         salary,
         address,
         country_group,
@@ -563,23 +568,24 @@ app.post('/profiles/update-family', verifyFirebaseToken, async (req, res) => {
 });
 
 // POST /profiles/update-education
-// Body: { education, occupation, companyName, salary }
+// Body: { education, occupation, companyName, designation, salary }
 app.post('/profiles/update-education', verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.user && req.user.uid;
     if (!uid) return res.status(400).json({ error: 'Invalid user' });
-    const { education, occupation, companyName, salary } = req.body || {};
+    const { education, occupation, companyName, designation, salary } = req.body || {};
     const pool = await getPool();
     console.log('[POST /profiles/update-education]', uid, { education, occupation, hasCompany: !!companyName });
     await pool.query(
       `UPDATE users_profiles
          SET education = $2,
              occupation = $3,
-             company_name = $4,
-             salary = $5,
+         company_name = $4,
+         designation = $5,
+         salary = $6,
              updated_at = now()
        WHERE uid = $1`,
-      [uid, education || null, occupation || null, companyName || null, salary || null],
+      [uid, education || null, occupation || null, companyName || null, designation || null, salary || null],
     );
     return res.json({ ok: true });
   } catch (e) {
